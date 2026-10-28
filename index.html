@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>In-Browser Codon Optimizer</title>
+    <style>
+        :root {
+            --bg-color: #f4f7f6;
+            --card-bg: #ffffff;
+            --primary: #2c3e50;
+            --accent: #16a085;
+            --text: #333333;
+            --border: #dcdde1;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text);
+            line-height: 1.6;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: var(--card-bg);
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+        }
+        h1 { color: var(--primary); margin-top: 0; border-bottom: 2px solid var(--bg-color); padding-bottom: 10px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+        @media (max-width: 600px) { .grid { grid-template-columns: 1fr; } .container { padding: 20px; } }
+        label { display: block; font-weight: bold; margin-bottom: 5px; color: var(--primary); }
+        textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        textarea { resize: vertical; height: 120px; }
+        button {
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            border-radius: 6px;
+            cursor: pointer;
+            width: 100%;
+            transition: background 0.2s;
+        }
+        button:hover { background-color: #148f77; }
+        button.secondary {
+            background-color: var(--primary);
+            width: auto;
+            padding: 6px 14px;
+            font-size: 13px;
+            margin-top: 8px;
+        }
+        .results-section { margin-top: 30px; display: none; }
+        .metric-badge {
+            background: var(--bg-color);
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid var(--accent);
+            margin-bottom: 15px;
+            font-size: 15px;
+        }
+        .warn { border-left-color: #e67e22; }
+        .output-box {
+            background: #2f3640;
+            color: #f5f6fa;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+            margin-top: 10px;
+        }
+        .check { font-weight: normal; margin: 10px 0 20px; display: flex; align-items: center; gap: 8px; }
+        .check input { width: auto; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🧬 In-Browser Codon Optimization Tool</h1>
+    <p>Optimize your amino acid sequence for target host expression. This tool balances host codon usage bias (CAI) with structural heuristic penalties (e.g., GC content control and hairpin prevention).</p>
+
+    <div class="grid">
+        <div>
+            <label for="hostSelect">Target Host Organism</label>
+            <select id="hostSelect">
+                <option value="ecoli">Escherichia coli</option>
+                <option value="yeast">Saccharomyces cerevisiae</option>
+                <option value="human">Homo sapiens</option>
+                <option value="pfalciparum">Plasmodium falciparum (3D7)</option>
+            </select>
+        </div>
+        <div>
+            <label for="temperature">Optimization Entropy (Temperature)</label>
+            <select id="temperature">
+                <option value="0.1">Low (Strictly Highest Frequency)</option>
+                <option value="0.5" selected>Medium (Balanced Monte Carlo)</option>
+                <option value="0.9">High (High Sequence Variation)</option>
+            </select>
+        </div>
+    </div>
+
+    <label for="peptideInput">Amino Acid Sequence (Single-letter code)</label>
+    <textarea id="peptideInput" placeholder="e.g., MGEKGHWLYAE... (FASTA headers and whitespace are ignored)"></textarea>
+
+    <label class="check"><input type="checkbox" id="addStop" checked> Append a stop codon if the sequence doesn't end with one</label>
+
+    <button onclick="optimizeSequence()">Optimize Sequence</button>
+
+    <div id="results" class="results-section">
+        <h2>Optimization Results</h2>
+        <div id="warnings"></div>
+        <div class="metric-badge">
+            <strong>Estimated Codon Adaptation Index (CAI):</strong> <span id="caiScore">0.00</span><br>
+            <small>Scores closer to 1.0 indicate highly optimized expression patterns for the chosen host.</small>
+        </div>
+        <div class="metric-badge">
+            <strong>GC Content:</strong> <span id="gcContent">0.0%</span> (Target: <span id="gcTarget">~40-60%</span>)
+        </div>
+        <div class="metric-badge">
+            <strong>Structural flags:</strong> <span id="structFlags">–</span>
+        </div>
+
+        <label>Optimized mRNA Sequence (5' → 3')</label>
+        <div id="mrnaOutput" class="output-box"></div>
+        <button class="secondary" onclick="copyText('mrnaOutput', this)">Copy mRNA</button>
+
+        <label style="margin-top:20px;">Optimized DNA (coding strand, 5' → 3')</label>
+        <div id="dnaOutput" class="output-box"></div>
+        <button class="secondary" onclick="copyText('dnaOutput', this)">Copy DNA</button>
+    </div>
+</div>
+
+<script>
+// Codon Usage Tables (simplified usage fractions per amino acid)
+const codonTables = {
+    ecoli: {
+        'A': [['GCG', 0.36], ['GCC', 0.26], ['GCA', 0.21], ['GCT', 0.17]],
+        'R': [['CGC', 0.40], ['CGT', 0.38], ['AGA', 0.07], ['AGG', 0.04], ['CGA', 0.06], ['CGG', 0.05]],
+        'N': [['AAC', 0.55], ['AAT', 0.45]],
+        'D': [['GAC', 0.53], ['GAT', 0.47]],
+        'C': [['TGC', 0.56], ['TGT', 0.44]],
+        'Q': [['CAG', 0.65], ['CAA', 0.35]],
+        'E': [['GAA', 0.69], ['GAG', 0.31]],
+        'G': [['GGT', 0.34], ['GGC', 0.39], ['GGA', 0.11], ['GGG', 0.16]],
+        'H': [['CAC', 0.58], ['CAT', 0.42]],
+        'I': [['ATC', 0.47], ['ATT', 0.48], ['ATA', 0.05]],
+        'L': [['CTG', 0.51], ['CTC', 0.10], ['CTT', 0.11], ['CTA', 0.04], ['TTA', 0.13], ['TTG', 0.11]],
+        'K': [['AAA', 0.76], ['AAG', 0.24]],
+        'M': [['ATG', 1.0]],
+        'F': [['TTC', 0.56], ['TTT', 0.44]],
+        'P': [['CCG', 0.52], ['CCT', 0.17], ['CCC', 0.13], ['CCA', 0.18]],
+        'S': [['AGC', 0.27], ['AGT', 0.15], ['TCG', 0.15], ['TCC', 0.15], ['TCA', 0.13], ['TCT', 0.15]],
+        'T': [['ACC', 0.43], ['ACG', 0.26], ['ACT', 0.17], ['ACA', 0.14]],
+        'W': [['TGG', 1.0]],
+        'Y': [['TAC', 0.56], ['TAT', 0.44]],
+        'V': [['GTG', 0.37], ['GTT', 0.26], ['GTC', 0.22], ['GTA', 0.15]],
+        '*': [['TAA', 0.64], ['TGA', 0.28], ['TAG', 0.08]]
+    },
+    human: {
+        'A': [['GCC', 0.40], ['GCT', 0.26], ['GCA', 0.23], ['GCG', 0.11]],
+        'R': [['CGC', 0.18], ['CGG', 0.20], ['AGA', 0.21], ['AGG', 0.21], ['CGT', 0.08], ['CGA', 0.11]],
+        'N': [['AAC', 0.53], ['AAT', 0.47]],
+        'D': [['GAC', 0.54], ['GAT', 0.46]],
+        'C': [['TGC', 0.54], ['TGT', 0.46]],
+        'Q': [['CAG', 0.74], ['CAA', 0.26]],
+        'E': [['GAG', 0.58], ['GAA', 0.42]],
+        'G': [['GGC', 0.34], ['GGA', 0.25], ['GGG', 0.25], ['GGT', 0.16]],
+        'H': [['CAC', 0.58], ['CAT', 0.42]],
+        'I': [['ATC', 0.47], ['ATT', 0.36], ['ATA', 0.17]],
+        'L': [['CTG', 0.40], ['CTC', 0.20], ['CTT', 0.13], ['TTG', 0.13], ['TTA', 0.07], ['CTA', 0.07]],
+        'K': [['AAG', 0.57], ['AAA', 0.43]],
+        'M': [['ATG', 1.0]],
+        'F': [['TTC', 0.54], ['TTT', 0.46]],
+        'P': [['CCC', 0.32], ['CCT', 0.29], ['CCA', 0.28], ['CCG', 0.11]],
+        'S': [['AGC', 0.24], ['TCC', 0.22], ['TCT', 0.19], ['AGT', 0.15], ['TCA', 0.15], ['TCG', 0.05]],
+        'T': [['ACC', 0.36], ['ACA', 0.28], ['ACT', 0.25], ['ACG', 0.11]],
+        'W': [['TGG', 1.0]],
+        'Y': [['TAC', 0.57], ['TAT', 0.43]],
+        'V': [['GTG', 0.46], ['GTT', 0.18], ['GTC', 0.24], ['GTA', 0.12]],
+        '*': [['TGA', 0.53], ['TAA', 0.30], ['TAG', 0.17]]
+    },
+    yeast: {
+        'A': [['GCT', 0.46], ['GCA', 0.29], ['GCC', 0.16], ['GCG', 0.09]],
+        'R': [['AGA', 0.47], ['AGG', 0.21], ['CGT', 0.14], ['CGC', 0.06], ['CGA', 0.07], ['CGG', 0.04]],
+        'N': [['AAT', 0.59], ['AAC', 0.41]],
+        'D': [['GAT', 0.65], ['GAC', 0.35]],
+        'C': [['TGT', 0.67], ['TGC', 0.33]],
+        'Q': [['CAA', 0.69], ['CAG', 0.31]],
+        'E': [['GAA', 0.70], ['GAG', 0.30]],
+        'G': [['GGT', 0.47], ['GGA', 0.22], ['GGG', 0.12], ['GGC', 0.19]],
+        'H': [['CAT', 0.64], ['CAC', 0.36]],
+        'I': [['ATT', 0.46], ['ATC', 0.26], ['ATA', 0.27]],
+        'L': [['TTG', 0.29], ['TTA', 0.26], ['CTA', 0.14], ['CTT', 0.13], ['CTC', 0.06], ['CTG', 0.11]],
+        'K': [['AAA', 0.58], ['AAG', 0.42]],
+        'M': [['ATG', 1.0]],
+        'F': [['TTT', 0.59], ['TTC', 0.41]],
+        'P': [['CCA', 0.41], ['CCT', 0.31], ['CCG', 0.15], ['CCC', 0.13]],
+        'S': [['TCT', 0.26], ['TCC', 0.16], ['TCA', 0.21], ['AGT', 0.14], ['AGC', 0.11], ['TCG', 0.11]],
+        'T': [['ACT', 0.35], ['ACA', 0.30], ['ACC', 0.22], ['ACG', 0.13]],
+        'W': [['TGG', 1.0]],
+        'Y': [['TAT', 0.56], ['TAC', 0.44]],
+        'V': [['GTT', 0.39], ['GTG', 0.19], ['GTC', 0.21], ['GTA', 0.21]],
+        '*': [['TAA', 0.48], ['TGA', 0.29], ['TAG', 0.22]]
+    },
+    // Plasmodium falciparum 3D7: extremely AT-rich genome (~80% AT, higher in coding third positions).
+    // Approximate usage fractions; replace with Kazusa/PlasmoDB values for publication-grade work.
+    pfalciparum: {
+        'A': [['GCT', 0.47], ['GCA', 0.33], ['GCC', 0.12], ['GCG', 0.08]],
+        'R': [['AGA', 0.46], ['AGG', 0.14], ['CGT', 0.16], ['CGA', 0.14], ['CGC', 0.05], ['CGG', 0.05]],
+        'N': [['AAT', 0.84], ['AAC', 0.16]],
+        'D': [['GAT', 0.79], ['GAC', 0.21]],
+        'C': [['TGT', 0.75], ['TGC', 0.25]],
+        'Q': [['CAA', 0.82], ['CAG', 0.18]],
+        'E': [['GAA', 0.82], ['GAG', 0.18]],
+        'G': [['GGT', 0.42], ['GGA', 0.38], ['GGG', 0.10], ['GGC', 0.10]],
+        'H': [['CAT', 0.78], ['CAC', 0.22]],
+        'I': [['ATT', 0.47], ['ATA', 0.40], ['ATC', 0.13]],
+        'L': [['TTA', 0.42], ['TTG', 0.17], ['CTT', 0.15], ['CTA', 0.14], ['CTC', 0.05], ['CTG', 0.07]],
+        'K': [['AAA', 0.82], ['AAG', 0.18]],
+        'M': [['ATG', 1.0]],
+        'F': [['TTT', 0.76], ['TTC', 0.24]],
+        'P': [['CCA', 0.43], ['CCT', 0.37], ['CCC', 0.12], ['CCG', 0.08]],
+        'S': [['AGT', 0.27], ['TCA', 0.21], ['TCT', 0.18], ['AGC', 0.13], ['TCC', 0.10], ['TCG', 0.11]],
+        'T': [['ACA', 0.41], ['ACT', 0.35], ['ACC', 0.15], ['ACG', 0.09]],
+        'W': [['TGG', 1.0]],
+        'Y': [['TAT', 0.81], ['TAC', 0.19]],
+        'V': [['GTT', 0.46], ['GTA', 0.30], ['GTG', 0.12], ['GTC', 0.12]],
+        '*': [['TAA', 0.62], ['TGA', 0.22], ['TAG', 0.16]]
+    }
+};
+
+// Per-host sequence design targets. P. falciparum is so AT-rich that the usual 40-60% GC
+// window would force unnatural codons, so it gets a much lower window and a longer allowed homopolymer run.
+const hostSettings = {
+    ecoli:       { gcMin: 40, gcMax: 60, maxHomo: 5 },
+    yeast:       { gcMin: 35, gcMax: 55, maxHomo: 6 },
+    human:       { gcMin: 40, gcMax: 60, maxHomo: 5 },
+    pfalciparum: { gcMin: 18, gcMax: 35, maxHomo: 8 }
+};
+
+// Precompute max frequency per amino acid for each host (for relative adaptiveness, w)
+const maxFreq = {};
+for (const host in codonTables) {
+    maxFreq[host] = {};
+    for (const aa in codonTables[host]) {
+        maxFreq[host][aa] = Math.max(...codonTables[host][aa].map(c => c[1]));
+    }
+}
+
+const VALID_AA = new Set('ACDEFGHIKLMNPQRSTVWY*'.split(''));
+
+function softmaxWeightedChoice(options, temperature) {
+    // Samples a codon with probability proportional to freq^(1/T)
+    let scoreSum = 0;
+    const adjusted = options.map(opt => {
+        const val = Math.exp(Math.log(opt[1] + 1e-5) / temperature);
+        scoreSum += val;
+        return { codon: opt[0], weight: val, originalFreq: opt[1] };
+    });
+
+    let rand = Math.random() * scoreSum;
+    for (let i = 0; i < adjusted.length; i++) {
+        rand -= adjusted[i].weight;
+        if (rand <= 0) return adjusted[i];
+    }
+    return adjusted[adjusted.length - 1];
+}
+
+function calculateSequenceMetrics(seq) {
+    let gcCount = 0;
+    for (const ch of seq) {
+        if (ch === 'G' || ch === 'C') gcCount++;
+    }
+    return { gcPercent: seq.length ? (gcCount / seq.length) * 100 : 0 };
+}
+
+function reverseComplement(dna) {
+    const comp = { A: 'T', T: 'A', G: 'C', C: 'G' };
+    let out = '';
+    for (let i = dna.length - 1; i >= 0; i--) out += comp[dna[i]];
+    return out;
+}
+
+// Heuristic: count 6-mers whose reverse complement appears 4-60 nt downstream (possible hairpin stem)
+function countHairpins(dna, stem = 6, minLoop = 4, maxSpan = 60) {
+    let count = 0;
+    for (let i = 0; i + stem <= dna.length; i++) {
+        const rc = reverseComplement(dna.substr(i, stem));
+        const start = i + stem + minLoop;
+        const end = Math.min(dna.length, i + stem + maxSpan);
+        if (dna.slice(start, end).includes(rc)) count++;
+    }
+    return count;
+}
+
+// Longest homopolymer run
+function maxHomopolymer(dna) {
+    let best = 0, run = 0, prev = '';
+    for (const ch of dna) {
+        run = ch === prev ? run + 1 : 1;
+        prev = ch;
+        if (run > best) best = run;
+    }
+    return best;
+}
+
+function computeCAI(codons, host) {
+    let logSum = 0, n = 0;
+    for (const c of codons) {
+        const aa = c.aa;
+        // Exclude Met, Trp and stop (single-codon / not informative for CAI)
+        if (aa === 'M' || aa === 'W' || aa === '*') continue;
+        const w = c.freq / maxFreq[host][aa];
+        logSum += Math.log(w);
+        n++;
+    }
+    return n ? Math.exp(logSum / n) : 1;
+}
+
+function scoreCandidate(dna, cai, host) {
+    const s = hostSettings[host];
+    const gc = calculateSequenceMetrics(dna).gcPercent;
+    let penalty = 0;
+    if (gc < s.gcMin) penalty += (s.gcMin - gc) * 0.02;
+    if (gc > s.gcMax) penalty += (gc - s.gcMax) * 0.02;
+    const homo = maxHomopolymer(dna);
+    if (homo > s.maxHomo) penalty += (homo - s.maxHomo) * 0.05;
+    const hairpins = countHairpins(dna);
+    penalty += Math.min(hairpins, 50) * 0.004;
+    return cai - penalty;
+}
+
+function buildCandidate(peptide, table, host, temp) {
+    const picked = [];
+    for (const aa of peptide) {
+        const choice = softmaxWeightedChoice(table[aa], temp);
+        picked.push({ aa, codon: choice.codon, freq: choice.originalFreq });
+    }
+    const dna = picked.map(p => p.codon).join('');
+    const cai = computeCAI(picked, host);
+    return { dna, cai, score: scoreCandidate(dna, cai, host) };
+}
+
+function optimizeSequence() {
+    let raw = document.getElementById('peptideInput').value;
+    const host = document.getElementById('hostSelect').value;
+    const temp = parseFloat(document.getElementById('temperature').value);
+    const addStop = document.getElementById('addStop').checked;
+
+    // Strip FASTA header lines, whitespace and digits
+    raw = raw.split('\n').filter(l => !l.trim().startsWith('>')).join('');
+    raw = raw.toUpperCase().replace(/[\s\d]/g, '');
+
+    if (!raw) {
+        alert("Please enter a valid amino acid sequence.");
+        return;
+    }
+
+    // Drop invalid characters but tell the user
+    const invalid = new Set();
+    let peptide = '';
+    for (const ch of raw) {
+        if (VALID_AA.has(ch)) peptide += ch;
+        else invalid.add(ch);
+    }
+
+    if (!peptide) {
+        alert("No valid amino acid characters found.");
+        return;
+    }
+
+    if (addStop && !peptide.endsWith('*')) peptide += '*';
+
+    const table = codonTables[host];
+
+    // Monte Carlo: generate many candidates, keep the best-scoring one
+    const iterations = temp <= 0.1 ? 1 : 200;
+    let best = null;
+    for (let i = 0; i < iterations; i++) {
+        const cand = buildCandidate(peptide, table, host, temp);
+        if (!best || cand.score > best.score) best = cand;
+    }
+
+    const dna = best.dna;
+    const mrna = dna.replace(/T/g, 'U');
+    const gc = calculateSequenceMetrics(dna).gcPercent;
+    const hairpins = countHairpins(dna);
+    const homo = maxHomopolymer(dna);
+
+    // Warnings
+    const warnBox = document.getElementById('warnings');
+    warnBox.innerHTML = '';
+    const warnings = [];
+    if (invalid.size) warnings.push('Ignored invalid characters: ' + [...invalid].join(' '));
+    if (peptide.slice(0, -1).includes('*')) warnings.push('Your sequence has an internal stop (*) — translation will terminate early.');
+    if (peptide[0] !== 'M') warnings.push('Sequence does not start with Met (M); expression needs a start codon.');
+    warnings.forEach(w => {
+        const d = document.createElement('div');
+        d.className = 'metric-badge warn';
+        d.textContent = '⚠ ' + w;
+        warnBox.appendChild(d);
+    });
+
+    document.getElementById('caiScore').textContent = best.cai.toFixed(3);
+    document.getElementById('gcContent').textContent = gc.toFixed(1) + '%';
+    document.getElementById('gcTarget').textContent =
+        `~${hostSettings[host].gcMin}-${hostSettings[host].gcMax}%`;
+    document.getElementById('structFlags').textContent =
+        `${hairpins} potential hairpin stems (6-mer), longest homopolymer run: ${homo} nt`;
+    document.getElementById('mrnaOutput').textContent = mrna;
+    document.getElementById('dnaOutput').textContent = dna;
+    document.getElementById('results').style.display = 'block';
+}
+
+function copyText(id, btn) {
+    const text = document.getElementById(id).textContent;
+    navigator.clipboard.writeText(text).then(() => {
+        const old = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = old, 1200);
+    });
+}
+</script>
+
+</body>
+</html>
