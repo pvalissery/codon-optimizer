@@ -1,5 +1,5 @@
 # codon-optimizer
-A lightweight, zero-dependency, single-file web tool that optimizes amino acid sequences for heterologous expression across different host organisms. It balances host codon usage bias with structural heuristic penalties entirely on the client side.
+A lightweight, zero-dependency, single-file web tool that optimizes amino acid sequences for heterologous expression across different host organisms. It balances host codon usage bias with structural heuristic penalties.
 
 Includes codon usage tables for Escherichia coli, Saccharomyces cerevisiae (yeast), Homo sapiens (human), and Plasmodium falciparum (3D7).
 
